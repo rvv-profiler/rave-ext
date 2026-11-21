@@ -21,3 +21,8 @@ export RAVE_BB_JSON_NAME=rave_bb_analysis.json
 #   RAVE_JSON_NAME     fichero de salida (si esta vacio, se usa <binario>_rave.json).
 export RAVE_PRINT_JSON=1
 export RAVE_JSON_NAME=rave_json.json
+
+# Trazas Paraver (.prv) - Desactivadas por defecto
+export RAVE_PRINT_PRV=0
+export RAVE_PRV_NAME=""
+

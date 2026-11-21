@@ -248,10 +248,10 @@ static int movement_category_for(const instr_data * instr){
 static void count_vector_operands(const instr_data * instr, int * reads, int * writes){
 	*reads = 0;
 	*writes = 0;
-	if (is_vector_reg(instr->src1)) (*reads)++;
-	if (is_vector_reg(instr->src2)) (*reads)++;
-	if (is_vector_reg(instr->src3)) (*reads)++;
-	if (is_vector_reg(instr->dst))  (*writes)++;
+	if (is_vector_reg(instr->src1_d)) (*reads)++;
+	if (is_vector_reg(instr->src2_d)) (*reads)++;
+	if (is_vector_reg(instr->src3_d)) (*reads)++;
+	if (is_vector_reg(instr->dst_d))  (*writes)++;
 }
 
 inline uint64_t synch_threads(thread_state_t * state){
@@ -497,460 +497,218 @@ inline int count_1s(char * reg, int vlB){
     return contador;
 }
 
-//Vector and vsetvli instructions
-void insn_exec(thread_state_t * state, instr_data * instr){
+static void track_dependencies(thread_state_t * state, const instr_data * instr, uint64_t lmul) {
+    if (!TRACE_EXTENDED || is_type(instr->type, T_VSETVL)) return;
 
-    if(DEBUG_INFO) fprintf(stdout, "Executing instruction: %s\n", instr->asm_string);
-	uint64_t thread_timestamp = synch_threads(state);
-	if (thread_timestamp==(uint64_t)-1) return;
+    inst_compressed_t instr_c;
+    instr_c.pos   = ++state->accum_counters.v_pos;
+    instr_c.g_pos = ++state->accum_counters.g_pos;
+    instr_c.type = instr->type_ext;
 
-	profile_t * loop_profile = &state->loop_profile;
-	if (TRACE_ENABLED){
-		if (PRINT_PROFILE){
-			detect_loop_start(loop_profile, instr->PC);
-		}
-		if (PRINT_CALLTRACE){
-#if 1
-			detect_func_start(&state->call_trace, instr->PC); 
-#endif
-		}
-	}
+    uint8_t min_lmul = lmul < 4 ? (uint8_t)(1 << lmul) : 1;    
 
-	int row = SCALAR_ROW;
-	uint64_t vl=0, vtype = 0, sew=3, lmul=1, rvl=0;
-	uint64_t addr = 0;
-	int stride = 0;
+    bool is_widening  = is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_ARITH_WIDENING);
+    bool is_narrowing = is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_ARITH_NARROWING);
+    bool is_masked    = is_type_ext(instr->type_ext, TYPE_EXT_MASKED, TYPE_EXT_MASKED);
 
-	int8_t * indexes_8 = NULL;
-	int16_t * indexes_16 = NULL;
-	int32_t * indexes_32 = NULL;
-	int64_t * indexes_64 = NULL;
+    uint8_t dst_factor  = is_widening  ? (min_lmul * 2 > 8 ? 8 : min_lmul * 2) : min_lmul;
+    uint8_t src1_factor = is_narrowing ? (min_lmul * 2 > 8 ? 8 : min_lmul * 2) : min_lmul;
+    uint8_t src2_factor = min_lmul;
+    uint8_t src3_factor = is_widening  ? dst_factor : min_lmul;
 
-    // To keep track of dependencies
-    if(TRACE_EXTENDED && !is_type(instr->type, T_VSETVL)){
-        inst_compressed_t instr_c;
-        instr_c.pos   = ++state->accum_counters.v_pos;
-        instr_c.g_pos = ++state->accum_counters.g_pos;
-        instr_c.type = instr->type_ext;
-
-        vtype = get_vtype(state);
-		lmul = vtype&0x7;
-        uint8_t min_lmul = lmul < 4 ? (uint8_t)(1 << lmul) : 1;    
-
-        bool is_widening  = is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_ARITH_WIDENING);
-        bool is_narrowing = is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_ARITH_NARROWING);
-        bool is_masked    = is_type_ext(instr->type_ext, TYPE_EXT_MASKED, TYPE_EXT_MASKED);
-
-        uint8_t dst_factor  = is_widening  ? (min_lmul * 2 > 8 ? 8 : min_lmul * 2) : min_lmul;
-        uint8_t src1_factor = is_narrowing ? (min_lmul * 2 > 8 ? 8 : min_lmul * 2) : min_lmul;
-        uint8_t src2_factor = min_lmul;
-        uint8_t src3_factor = is_widening  ? dst_factor : min_lmul;
-
-        if (is_type_ext(instr->type_ext, MASK_EXT_SUBSUBTYPE, TYPE_EXT_ARITH_MASK)) {
-            dst_factor = 1;
-        }
-
-        if (is_type_ext(instr->type_ext, MASK_EXT_SUBSUBTYPE, TYPE_EXT_ARITH_REDUCTION)) {
-            dst_factor  = 1;
-            src2_factor = 1;
-        }
-
-        if (is_type_ext(instr->type_ext, MASK_EXT_OPERAND, TYPE_EXT_WHOLE_REGISTER)) {
-            uint8_t whole_count = ((instr->instr32 >> 15) & 0x7) + 1;
-            dst_factor  = whole_count;
-            src1_factor = whole_count;
-        }
-
-        if (is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_MEMORY_WHOLE_REGISTER)) {
-            uint8_t whole_count = ((instr->instr32 >> 29) & 0x7) + 1;
-            if (is_type_ext(instr->type_ext, MASK_EXT_BASE, TYPE_EXT_LOAD)) {
-                dst_factor = whole_count;
-            } else if (is_type_ext(instr->type_ext, MASK_EXT_BASE, TYPE_EXT_STORE)) {
-                src3_factor = whole_count;
-            }
-        }
-
-        uint8_t count_dst  = (instr->dst_d  >= RAVE_INI_REG_V) ? dst_factor  : 1;                                                                                                                      
-        uint8_t count_src1 = (instr->src1_d >= RAVE_INI_REG_V) ? src1_factor : 1;  
-        uint8_t count_src2 = (instr->src2_d >= RAVE_INI_REG_V) ? src2_factor : 1;  
-        uint8_t count_src3 = (instr->src3_d >= RAVE_INI_REG_V) ? src3_factor : 1;  
-
-        // To keep track of the Just-Before-Matrix instructions (10x10)
-        if (state->prev_vec_type_ext != -1) {
-            uint16_t prev_cat = get_overlap_class_idx((uint16_t)state->prev_vec_type_ext);
-            uint16_t curr_cat = get_overlap_class_idx(instr->type_ext);
-            if (prev_cat != INVALID_RAW_IDX && curr_cat != INVALID_RAW_IDX) {
-                state->accum_counters.JUST_BEFORE_MATRIX[prev_cat][curr_cat]++;
-            }
-        }
-        state->prev_vec_type_ext = (int)instr->type_ext;
-        if (valid_reg_id(instr->dst_d)) {
-            // CASO A: Destino Vectorial (Vector -> Vector)
-            if (instr->dst_d >= RAVE_INI_REG_V) {
-                inst_compressed_t latest_waw = {0};
-                inst_compressed_t latest_war = {0};
-                for (int i = 0; i < count_dst && (instr->dst_d + i) < 96; ++i) {
-                    short r = instr->dst_d + i;
-                    if (state->write_reg_deps[r].pos > latest_waw.pos) latest_waw = state->write_reg_deps[r];
-                    if (state->read_reg_deps[r].pos  > latest_war.pos) latest_war = state->read_reg_deps[r];
-                }
-
-                // VWAW
-                if (latest_waw.pos != 0) {
-                    long dist_waw = instr_c.pos - latest_waw.pos;
-                    state->accum_counters.VWAW_deps[get_distance_bin(dist_waw)]++;
-                    state->accum_counters.total_VWAW_deps++;
-                    state->accum_counters.avg_VWAW_deps += dist_waw;
-
-                    if (DEBUG_INFO) {
-                        fprintf(stdout, "VWAW dependency on vreg group %d: pos %li, prev write at pos %li\n", 
-                            instr->dst_d, instr_c.pos, latest_waw.pos);
-                    }
-                }
-                // VWAR
-                if (latest_war.pos != 0) {
-                    long dist_war = instr_c.pos - latest_war.pos;
-                    state->accum_counters.VWAR_deps[get_distance_bin(dist_war)]++;
-                    state->accum_counters.total_VWAR_deps++;
-                    state->accum_counters.avg_VWAR_deps += dist_war;
-
-                    if (DEBUG_INFO) {
-                        fprintf(stdout, "VWAR dependency on vreg group %d: pos %li, prev read at pos %li\n", 
-                            instr->dst_d, instr_c.pos, latest_war.pos);
-                    }
-                }
-            } 
-            // CASO B: Destino Escalar (Vector escribe en registro escalar x1..x31)
-            else if (instr->dst_d > 0) {
-                // WAW Escalar: Escalar previo escribió en dst_d y ahora el vector lo sobrescribe
-                if (state->write_reg_deps[instr->dst_d].g_pos != 0) {
-                    long dist_waw_s = instr_c.g_pos - state->write_reg_deps[instr->dst_d].g_pos;
-                    if (dist_waw_s <= WAW_DIST) {
-                        state->accum_counters.WAW_deps++;
-                    }
-                    if (DEBUG_INFO) {
-                        fprintf(stdout, "Scalar WAW on xreg %d: g_pos %li, prev write at g_pos %li (dist %li)\n",
-                            instr->dst_d, instr_c.g_pos, state->write_reg_deps[instr->dst_d].g_pos, dist_waw_s);
-                    }
-                }
-
-                // WAR Escalar: Escalar previo leyó dst_d y ahora el vector lo sobrescribe
-                if (state->read_reg_deps[instr->dst_d].g_pos != 0) {
-                    long dist_war_s = instr_c.g_pos - state->read_reg_deps[instr->dst_d].g_pos;
-                    if (dist_war_s <= WAR_DIST) {
-                        state->accum_counters.WAR_deps++;
-                    }
-                    if (DEBUG_INFO) {
-                        fprintf(stdout, "Scalar WAR on xreg %d: g_pos %li, prev read at g_pos %li (dist %li)\n",
-                            instr->dst_d, instr_c.g_pos, state->read_reg_deps[instr->dst_d].g_pos, dist_war_s);
-                    }
-                }
-            }
-        }
-        #define CHECK_V_TO_V_RAW(base_reg, count) do { \
-            if(valid_reg_id(base_reg)) { \
-                if (base_reg >= RAVE_INI_REG_V) { \
-                    inst_compressed_t latest = {0}; \
-                    for (int i = 0; i < (count) && (base_reg + i) < 96; ++i) { \
-                        if (state->write_reg_deps[base_reg + i].pos > latest.pos) { \
-                            latest = state->write_reg_deps[base_reg + i]; \
-                        } \
-                    } \
-                    if (latest.pos != 0) { \
-                        long dist_chaining = instr_c.pos - latest.pos; \
-                        state->accum_counters.VRAW_deps[get_distance_bin(dist_chaining)]++; \
-                        state->accum_counters.avg_VRAW_deps += dist_chaining;  \
-                        state->accum_counters.total_VRAW_deps++; \
-                        if (dist_chaining <= RAW_DIST_CHAINING) { \
-                            uint8_t prod = get_prod_idx(latest.type); \
-                            uint8_t cons = get_cons_idx(instr->type_ext);  \
-                            if (prod != INVALID_RAW_IDX && cons != INVALID_RAW_IDX) { \
-                                state->accum_counters.RAW_MATRIX_PC[prod][cons]++; \
-                            } \
-                        } \
-                        if(DEBUG_INFO) { \
-                            fprintf(stdout, "VRAW dependency detected on register group %d: read at pos %li, instruction: %s, previous write at pos %li\n", \
-                                (base_reg), instr_c.pos, instr->asm_string, \
-                                latest.pos); \
-                        } \
-                    } \
-                } else if(base_reg > 0) {  \
-                    if(state->write_reg_deps[base_reg].g_pos != 0 && instr_c.g_pos - state->write_reg_deps[base_reg].g_pos <= RAW_DIST) {  \
-                        state->accum_counters.RAW_deps++; \
-                    } \
-                } \
-            } \
-        } while(0)
-        // Making sure thus that the dependencies are updated for all vector registers involved in the instruction (taking into account LMUL)
-        CHECK_V_TO_V_RAW(instr->src1_d, count_src1);
-        CHECK_V_TO_V_RAW(instr->src2_d, count_src2);
-        CHECK_V_TO_V_RAW(instr->src3_d, count_src3);
-        if (is_masked) {
-            CHECK_V_TO_V_RAW(RAVE_INI_REG_V + 0, 1);
-        }
-        #undef CHECK_V_TO_V_RAW
-        for(int i = 0; i < count_dst; i++)  if(valid_reg_id(instr->dst_d  + i)) state->write_reg_deps[instr->dst_d  + i] = instr_c;
-        for(int i = 0; i < count_src1; i++) if(valid_reg_id(instr->src1_d + i)) state->read_reg_deps[instr->src1_d  + i] = instr_c;
-        for(int i = 0; i < count_src2; i++) if(valid_reg_id(instr->src2_d + i)) state->read_reg_deps[instr->src2_d  + i] = instr_c;
-        for(int i = 0; i < count_src3; i++) if(valid_reg_id(instr->src3_d + i)) state->read_reg_deps[instr->src3_d  + i] = instr_c;
-        if (is_masked) state->read_reg_deps[RAVE_INI_REG_V + 0] = instr_c;
-
-        uint32_t dst_mask = 0;
-        if (is_vector_reg(instr->dst_d)) {
-            int v_dst = instr->dst_d - RAVE_INI_REG_V;
-            for (int k = 0; k < count_dst && (v_dst + k) < NUM_VECTOR_REGS; ++k) {
-                dst_mask |= (1U << (v_dst + k));
-            }
-        }
-
-        uint32_t src_mask = 0;
-        if (is_vector_reg(instr->src1_d)) {
-            int v_src1 = instr->src1_d - RAVE_INI_REG_V;
-            for (int k = 0; k < count_src1 && (v_src1 + k) < NUM_VECTOR_REGS; ++k) {
-                src_mask |= (1U << (v_src1 + k));
-            }
-        }
-        if (is_vector_reg(instr->src2_d)) {
-            int v_src2 = instr->src2_d - RAVE_INI_REG_V;
-            for (int k = 0; k < count_src2 && (v_src2 + k) < NUM_VECTOR_REGS; ++k) {
-                src_mask |= (1U << (v_src2 + k));
-            }
-        }
-        if (is_vector_reg(instr->src3_d)) {
-            int v_src3 = instr->src3_d - RAVE_INI_REG_V;
-            for (int k = 0; k < count_src3 && (v_src3 + k) < NUM_VECTOR_REGS; ++k) {
-                src_mask |= (1U << (v_src3 + k));
-            }
-        }
-        if (is_masked) {
-            src_mask |= (1U << 0);
-        }
-
-        track_vector_parallelism_available(state, dst_mask, src_mask);
+    if (is_type_ext(instr->type_ext, MASK_EXT_SUBSUBTYPE, TYPE_EXT_ARITH_MASK)) {
+        dst_factor = 1;
     }
 
-	if (is_type(instr->type, T_VECTOR)){ //VECTOR
-		record_vector_register(state->accum_counters.vector_register_usage, instr->dst);
-		record_vector_register(state->accum_counters.vector_register_usage, instr->src1);
-		record_vector_register(state->accum_counters.vector_register_usage, instr->src2);
-		record_vector_register(state->accum_counters.vector_register_usage, instr->src3);
-		loop_profile -> used_vreg[((instr->instr32)>>7)&0x1F] = 1;
-		row = VECTOR_ROW;
-		vl = get_vl(state); 
-		vtype = get_vtype(state);
-#ifdef RVV_07
-		sew = (vtype >> 2)&0x7;
-		lmul = vtype&0x3;
-#else
-		sew = (vtype >> 3)&0x7;
-		lmul = vtype&0x7;
+    if (is_type_ext(instr->type_ext, MASK_EXT_SUBSUBTYPE, TYPE_EXT_ARITH_REDUCTION)) {
+        dst_factor  = 1;
+        src2_factor = 1;
+    }
 
-#endif
-		if (is_subtype(instr->type, T_MEMORY)){
-			/* la base rs1 hace falta para TRACE_ADDR, para la traza y para
-			 * medir el rango de direcciones de las indexadas */
-			int is_indexed = is_subsubtype(instr->type, T_INDEX);
-			if (TRACE_ADDR || INST_TRACE_ENABLED || is_indexed){
-				int src1 = (instr->instr32>>15)&0x1F;
-				addr = get_xreg(state,src1);
-			}
+    if (is_type_ext(instr->type_ext, MASK_EXT_OPERAND, TYPE_EXT_WHOLE_REGISTER)) {
+        uint8_t whole_count = ((instr->instr32 >> 15) & 0x7) + 1;
+        dst_factor  = whole_count;
+        src1_factor = whole_count;
+    }
 
-			if (is_subsubtype(instr->type, T_STRIDE)){
-				int src2 = (instr->instr32>>20)&0x1F;
-				stride = get_xreg(state,src2);
-			}
-			int data_sew = sew;      /* SEW del dato (escala del offset) */
-#ifndef RVV_07
-			int width = (instr->instr32 >> 12)&0x3; 
-			sew = width;             /* SEW del indice (como leer el vector) */
-#endif
+    if (is_type_ext(instr->type_ext, MASK_EXT_SUBTYPE, TYPE_EXT_MEMORY_WHOLE_REGISTER)) {
+        uint8_t whole_count = ((instr->instr32 >> 29) & 0x7) + 1;
+        if (is_type_ext(instr->type_ext, MASK_EXT_BASE, TYPE_EXT_LOAD)) {
+            dst_factor = whole_count;
+        } else if (is_type_ext(instr->type_ext, MASK_EXT_BASE, TYPE_EXT_STORE)) {
+            src3_factor = whole_count;
+        }
+    }
 
-			if((TRACE_INDEXES || INST_TRACE_ENABLED || is_indexed) && is_indexed){
-				int src2 = (instr->instr32>>20)&0x1F;
-				char * contents = get_vreg(state,src2,vl*(2<<(sew)));
-				if (sew==0) indexes_8 = (int8_t*)contents;
-				else if (sew==1) indexes_16 = (int16_t*)contents;
-				else if (sew==2) indexes_32 = (int32_t*)contents;
-				else if (sew==3) indexes_64 = (int64_t*)contents;
-			}
+    uint8_t count_dst  = (instr->dst_d  >= RAVE_INI_REG_V) ? dst_factor  : 1;                                                                                                                      
+    uint8_t count_src1 = (instr->src1_d >= RAVE_INI_REG_V) ? src1_factor : 1;  
+    uint8_t count_src2 = (instr->src2_d >= RAVE_INI_REG_V) ? src2_factor : 1;  
+    uint8_t count_src3 = (instr->src3_d >= RAVE_INI_REG_V) ? src3_factor : 1;  
 
-			/* Rango de direcciones de esta ejecucion: base + indice*EEW.
-			 * Se acumula (max-min) y el numero de ejecuciones por
-			 * instruccion; el informe publica la media del rango. */
-			if (is_indexed && instr->vinstr_idx >= 0 && vl > 0){
-				int64_t emin = 0, emax = -1, step = (int64_t)1 << data_sew;
-				for (uint64_t i = 0; i < vl; ++i){
-					int64_t idx = indexes_8 ? (int64_t)indexes_8[i] :
-					             indexes_16 ? (int64_t)indexes_16[i] :
-					             indexes_32 ? (int64_t)indexes_32[i] :
-					             indexes_64 ? (int64_t)indexes_64[i] : 0;
-					int64_t a = (int64_t)addr + idx * step;
-					if (emax < 0){ emin = emax = a; }
-					if (a < emin) emin = a;
-					if (a > emax) emax = a;
-				}
-				if (emax >= emin){
-					state->accum_counters.addr_range_sum[instr->vinstr_idx] +=
-						(double)(emax - emin);
-					state->accum_counters.addr_range_n[instr->vinstr_idx] += 1;
-				}
-			}
+    // To keep track of the Just-Before-Matrix instructions (10x10)
+    if (state->prev_vec_type_ext != -1) {
+        uint16_t prev_cat = get_overlap_class_idx((uint16_t)state->prev_vec_type_ext);
+        uint16_t curr_cat = get_overlap_class_idx(instr->type_ext);
+        if (prev_cat != INVALID_RAW_IDX && curr_cat != INVALID_RAW_IDX) {
+            state->accum_counters.JUST_BEFORE_MATRIX[prev_cat][curr_cat]++;
+        }
+    }
+    state->prev_vec_type_ext = (int)instr->type_ext;
+    if (valid_reg_id(instr->dst_d)) {
+        // CASO A: Destino Vectorial (Vector -> Vector)
+        if (instr->dst_d >= RAVE_INI_REG_V) {
+            inst_compressed_t latest_waw = {0};
+            inst_compressed_t latest_war = {0};
+            for (int i = 0; i < count_dst && (instr->dst_d + i) < 96; ++i) {
+                short r = instr->dst_d + i;
+                if (state->write_reg_deps[r].pos > latest_waw.pos) latest_waw = state->write_reg_deps[r];
+                if (state->read_reg_deps[r].pos  > latest_war.pos) latest_war = state->read_reg_deps[r];
+            }
 
-			/* si nadie mas los va a usar, liberar los indices ya */
-			if (!TRACE_INDEXES && !INST_TRACE_ENABLED){
-				free(indexes_8); free(indexes_16); free(indexes_32); free(indexes_64);
-				indexes_8 = NULL; indexes_16 = NULL;
-				indexes_32 = NULL; indexes_64 = NULL;
-			}
+            // VWAW
+            if (latest_waw.pos != 0) {
+                long dist_waw = instr_c.pos - latest_waw.pos;
+                state->accum_counters.VWAW_deps[get_distance_bin(dist_waw)]++;
+                state->accum_counters.total_VWAW_deps++;
+                state->accum_counters.avg_VWAW_deps += dist_waw;
 
-#ifndef RVV_07
-			if ((((instr->instr32>>20)&0xFF) == 0x28)){
-				sew = 0; //sew: 1 byte (8 bits)
-				vl = RAVE_VLMAX / 8; //vl
-			}
-		}else if ( ((instr->instr32&0x7F)==0x57) && (((instr->instr32>>26)&0x3F)==0x27) && (((instr->instr32>>12)&0x07)==0x03)) {
-			//Whole register move
-			int NFIELDS = (instr->instr32>>15)&0x1F;
-			lmul = NFIELDS==7?3 : NFIELDS==3?2 : NFIELDS==1?1 : 0;
-			sew = 0; //sew: 1 byte (8 bits)
-			vl = RAVE_VLMAX / 8; //vl
-#endif
-		}
-	}else if (is_type(instr->type, T_VSETVL)){
-		int src1 = (instr->instr32>>15)&0x1F;
-        rvl = get_xreg(state,src1);
-	}
+                if (DEBUG_INFO) {
+                    fprintf(stdout, "VWAW dependency on vreg group %d: pos %li, prev write at pos %li\n", 
+                        instr->dst_d, instr_c.pos, latest_waw.pos);
+                }
+            }
+            // VWAR
+            if (latest_war.pos != 0) {
+                long dist_war = instr_c.pos - latest_war.pos;
+                state->accum_counters.VWAR_deps[get_distance_bin(dist_war)]++;
+                state->accum_counters.total_VWAR_deps++;
+                state->accum_counters.avg_VWAR_deps += dist_war;
 
-	//  Logfile  //
-	if (TRACE_ENABLED){
-		if (PRINT_LOGFILE){
-			if (!TRACE_SCALAR && state->scalar_instr_since_vector>0){
-				char string[128];
-				if (-1 == sprintf(string,"%d", state->scalar_instr_since_vector)){
-					printf("Error sprintf\n"); 
-					exit(-1);
-				}
-				set_lock(write_lock);
-				plugin_outs(string);
-				plugin_outs(" scalar instructions\n");
-				release_lock(write_lock);
-			}
-			set_lock(write_lock);
-			plugin_outs(instr->asm_string);
-			plugin_outs("\n");
-			release_lock(write_lock);
-		}
+                if (DEBUG_INFO) {
+                    fprintf(stdout, "VWAR dependency on vreg group %d: pos %li, prev read at pos %li\n", 
+                        instr->dst_d, instr_c.pos, latest_war.pos);
+                }
+            }
+        } 
+        // CASO B: Destino Escalar (Vector escribe en registro escalar x1..x31)
+        else if (instr->dst_d > 0) {
+            // WAW Escalar: Escalar previo escribió en dst_d y ahora el vector lo sobrescribe
+            if (state->write_reg_deps[instr->dst_d].g_pos != 0) {
+                long dist_waw_s = instr_c.g_pos - state->write_reg_deps[instr->dst_d].g_pos;
+                if (dist_waw_s <= WAW_DIST) {
+                    state->accum_counters.WAW_deps++;
+                }
+                if (DEBUG_INFO) {
+                    fprintf(stdout, "Scalar WAW on xreg %d: g_pos %li, prev write at g_pos %li (dist %li)\n",
+                        instr->dst_d, instr_c.g_pos, state->write_reg_deps[instr->dst_d].g_pos, dist_waw_s);
+                }
+            }
 
-		//  Instruction Trace  //
-		if (INST_TRACE_ENABLED){
-			if (is_type(instr->type, T_VSETVL)){
-				inst_trace_emit_vsetvl(state, instr, rvl, vl, vtype);
-			}else{
-				void * idx_ptr = indexes_8 ? (void*)indexes_8 :
-				                 indexes_16 ? (void*)indexes_16 :
-				                 indexes_32 ? (void*)indexes_32 : (void*)indexes_64;
-				inst_trace_emit_vector(state, instr, vl, sew, lmul, vtype, addr, stride,
-				                       idx_ptr, is_subsubtype(instr->type, T_INDEX));
-			}
-		}
+            // WAR Escalar: Escalar previo leyó dst_d y ahora el vector lo sobrescribe
+            if (state->read_reg_deps[instr->dst_d].g_pos != 0) {
+                long dist_war_s = instr_c.g_pos - state->read_reg_deps[instr->dst_d].g_pos;
+                if (dist_war_s <= WAR_DIST) {
+                    state->accum_counters.WAR_deps++;
+                }
+                if (DEBUG_INFO) {
+                    fprintf(stdout, "Scalar WAR on xreg %d: g_pos %li, prev read at g_pos %li (dist %li)\n",
+                        instr->dst_d, instr_c.g_pos, state->read_reg_deps[instr->dst_d].g_pos, dist_war_s);
+                }
+            }
+        }
+    }
+    #define CHECK_V_TO_V_RAW(base_reg, count) do { \
+        if(valid_reg_id(base_reg)) { \
+            if (base_reg >= RAVE_INI_REG_V) { \
+                inst_compressed_t latest = {0}; \
+                for (int i = 0; i < (count) && (base_reg + i) < 96; ++i) { \
+                    if (state->write_reg_deps[base_reg + i].pos > latest.pos) { \
+                        latest = state->write_reg_deps[base_reg + i]; \
+                    } \
+                } \
+                if (latest.pos != 0) { \
+                    long dist_chaining = instr_c.pos - latest.pos; \
+                    state->accum_counters.VRAW_deps[get_distance_bin(dist_chaining)]++; \
+                    state->accum_counters.avg_VRAW_deps += dist_chaining;  \
+                    state->accum_counters.total_VRAW_deps++; \
+                    if (dist_chaining <= RAW_DIST_CHAINING) { \
+                        uint8_t prod = get_prod_idx(latest.type); \
+                        uint8_t cons = get_cons_idx(instr->type_ext);  \
+                        if (prod != INVALID_RAW_IDX && cons != INVALID_RAW_IDX) { \
+                            state->accum_counters.RAW_MATRIX_PC[prod][cons]++; \
+                        } \
+                    } \
+                    if(DEBUG_INFO) { \
+                        fprintf(stdout, "VRAW dependency detected on register group %d: read at pos %li, instruction: %s, previous write at pos %li\n", \
+                            (base_reg), instr_c.pos, instr->asm_string, \
+                            latest.pos); \
+                    } \
+                } \
+            } else if(base_reg > 0) {  \
+                if(state->write_reg_deps[base_reg].g_pos != 0 && instr_c.g_pos - state->write_reg_deps[base_reg].g_pos <= RAW_DIST) {  \
+                    state->accum_counters.RAW_deps++; \
+                } \
+            } \
+        } \
+    } while(0)
+    // Making sure thus that the dependencies are updated for all vector registers involved in the instruction (taking into account LMUL)
+    CHECK_V_TO_V_RAW(instr->src1_d, count_src1);
+    CHECK_V_TO_V_RAW(instr->src2_d, count_src2);
+    CHECK_V_TO_V_RAW(instr->src3_d, count_src3);
+    if (is_masked) {
+        CHECK_V_TO_V_RAW(RAVE_INI_REG_V + 0, 1);
+    }
+    #undef CHECK_V_TO_V_RAW
+    for(int i = 0; i < count_dst; i++)  if(valid_reg_id(instr->dst_d  + i)) state->write_reg_deps[instr->dst_d  + i] = instr_c;
+    for(int i = 0; i < count_src1; i++) if(valid_reg_id(instr->src1_d + i)) state->read_reg_deps[instr->src1_d  + i] = instr_c;
+    for(int i = 0; i < count_src2; i++) if(valid_reg_id(instr->src2_d + i)) state->read_reg_deps[instr->src2_d  + i] = instr_c;
+    for(int i = 0; i < count_src3; i++) if(valid_reg_id(instr->src3_d + i)) state->read_reg_deps[instr->src3_d  + i] = instr_c;
+    if (is_masked) state->read_reg_deps[RAVE_INI_REG_V + 0] = instr_c;
 
-		//  PRV  //
-		if (PRINT_PRV){
-			int cpu_index = state->cpu_index;
-			char row_change = (row != state->last_row) ?1:0;
-			if (row_change && !MUSA){ 
-				set_lock(write_lock);
-				trace_row(FD_PRV,mpi_rank, cpu_index, state->last_row, thread_timestamp);
-				clean_event(FD_PRV);
-				release_lock(write_lock);
-			}
-			//Scalar instructions should always be printed when: row changed(1), type changed (2), is first scalar in the trace (3)
-			if (is_type(instr->type, T_VSETVL)){
-				set_lock(write_lock);
-				trace_row(FD_PRV,mpi_rank, cpu_index, row, thread_timestamp);
-				trace_event_value(FD_PRV,event_class,instr->type);
-				trace_event_value(FD_PRV,event_pc, instr->PC);
-				trace_event_value(FD_PRV,event_instruction, instr->paraver_code);
-				if (MUSA){
-					int prev_dst = state->prev_dst;
-					state->prev_dst = instr->dst;
-					trace_event_value(FD_PRV,event_dst, prev_dst);
-				}else{
-					trace_event_value(FD_PRV,event_dst, instr->dst);
-				}
-				trace_event_value(FD_PRV,event_src1, instr->src1);
-				trace_event_value(FD_PRV,event_rvl, rvl); 
-				release_lock(write_lock);
-			}else{ //VECTOR 
-				set_lock(write_lock);
-				trace_row(FD_PRV,mpi_rank, cpu_index, row, thread_timestamp);
-				trace_event_value(FD_PRV,event_class,instr->type);
-				trace_event_value(FD_PRV,event_pc, instr->PC);
-				trace_event_value(FD_PRV,event_scalb, state->scalar_instr_since_vector);
-				if (TRACE_ADDR) trace_event_value(FD_PRV,event_addr, addr);
-				if (TRACE_INDEXES){
-					if (indexes_8 != NULL){
-						trace_event_value(FD_PRV, event_indexes, 1);
-						for(uint64_t i=0; i<vl; ++i) trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_8[i]);
-						free(indexes_8);
-						indexes_8 = NULL;
-					}else if (indexes_16 != NULL){
-						trace_event_value(FD_PRV, event_indexes, 1);
-						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_16[i]);
-						free(indexes_16);
-						indexes_16 = NULL;
-					}else if (indexes_32 != NULL){
-						trace_event_value(FD_PRV, event_indexes, 1);
-						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_32[i]);
-						free(indexes_32);
-						indexes_32 = NULL;
-					}else if (indexes_64 != NULL){
-						trace_event_value(FD_PRV, event_indexes, 1);
-						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, indexes_64[i]);
-						free(indexes_64);
-						indexes_64 = NULL;
-					}
-				}
-				if (MUSA){
-					int prev_dst = state->prev_dst;
-					state->prev_dst = instr->dst;
-					trace_event_value(FD_PRV,event_dst, prev_dst);
-				}else{
-					trace_event_value(FD_PRV,event_dst, instr->dst);
-				}
-				trace_event_value(FD_PRV,event_src1, instr->src1);
-				trace_event_value(FD_PRV,event_src2, instr->src2);
-				if (instr->src3>=0) trace_event_value(FD_PRV,event_src3, instr->src3);
-				trace_event_value(FD_PRV,event_instruction, instr->paraver_code);
-				trace_event_value(FD_PRV,event_vl, vl);
-				if (MUSA){
-					trace_event_value(FD_PRV,event_sew, 1<<(3+sew));
-					int musa_lmul = lmul<4 ? 1<<lmul : lmul==5?18 : lmul==6?14 : lmul==7?12 : 0;
-					trace_event_value(FD_PRV,event_lmul, musa_lmul);
-				}else{
-					trace_event_value(FD_PRV,event_sew, sew);
-					trace_event_value(FD_PRV,event_lmul, lmul);
-				}
-				if (is_type(instr->type, T_VECTOR) && is_subtype(instr->type, T_MEMORY) && is_subsubtype(instr->type, T_STRIDE)){
-					trace_event_value(FD_PRV,event_stride, stride);
-					state->reset_stride = 1;
-				}else if (state->reset_stride){
-					trace_event_value(FD_PRV,event_stride, 0);
-					state->reset_stride = 0;
-				}	
-				release_lock(write_lock);
-			}
-		}
-	}
+    uint32_t dst_mask = 0;
+    if (is_vector_reg(instr->dst_d)) {
+        int v_dst = instr->dst_d - RAVE_INI_REG_V;
+        for (int k = 0; k < count_dst && (v_dst + k) < NUM_VECTOR_REGS; ++k) {
+            dst_mask |= (1U << (v_dst + k));
+        }
+    }
 
-	if (indexes_8) { free(indexes_8); indexes_8 = NULL; }
-	if (indexes_16) { free(indexes_16); indexes_16 = NULL; }
-	if (indexes_32) { free(indexes_32); indexes_32 = NULL; }
-	if (indexes_64) { free(indexes_64); indexes_64 = NULL; }
+    uint32_t src_mask = 0;
+    if (is_vector_reg(instr->src1_d)) {
+        int v_src1 = instr->src1_d - RAVE_INI_REG_V;
+        for (int k = 0; k < count_src1 && (v_src1 + k) < NUM_VECTOR_REGS; ++k) {
+            src_mask |= (1U << (v_src1 + k));
+        }
+    }
+    if (is_vector_reg(instr->src2_d)) {
+        int v_src2 = instr->src2_d - RAVE_INI_REG_V;
+        for (int k = 0; k < count_src2 && (v_src2 + k) < NUM_VECTOR_REGS; ++k) {
+            src_mask |= (1U << (v_src2 + k));
+        }
+    }
+    if (is_vector_reg(instr->src3_d)) {
+        int v_src3 = instr->src3_d - RAVE_INI_REG_V;
+        for (int k = 0; k < count_src3 && (v_src3 + k) < NUM_VECTOR_REGS; ++k) {
+            src_mask |= (1U << (v_src3 + k));
+        }
+    }
+    if (is_masked) {
+        src_mask |= (1U << 0);
+    }
 
-	// Counters //
+    track_vector_parallelism_available(state, dst_mask, src_mask);
+}
+
+static void accumulate_counters(thread_state_t * state, profile_t * loop_profile, const instr_data * instr,
+                                uint64_t vl, uint64_t vtype, uint64_t sew, uint64_t lmul, int stride) {
 	loop_profile->loop_instr++; 
 	if (is_type(instr->type, T_VECTOR)) {
+		record_vector_register(state->accum_counters.vector_register_usage, instr->dst_d);
+		record_vector_register(state->accum_counters.vector_register_usage, instr->src1_d);
+		record_vector_register(state->accum_counters.vector_register_usage, instr->src2_d);
+		record_vector_register(state->accum_counters.vector_register_usage, instr->src3_d);
+		loop_profile->used_vreg[((instr->instr32)>>7)&0x1F] = 1;
+
 		if (PROFILE_WEIGHT == w_ELEMS)
 			loop_profile->loop_weight += vl;
 		else if (PROFILE_WEIGHT == w_INSTR)
@@ -966,14 +724,13 @@ void insn_exec(thread_state_t * state, instr_data * instr){
 
         if(TRACE_EXTENDED){
             // To track accumulated vl, lmul, occupancy...
-            vtype = get_vtype(state);
             double real_lmul = 0;
             double real_sew_bits = 8 << sew; // 0,1,2,3 -> SEW 8,16,32,64
             bool ta = (vtype >> 6) & 0x1; // tail agnostic
             bool ma = (vtype >> 7) & 0x1; // mask agnostic
             int masked = is_type_ext(instr->type_ext, TYPE_EXT_MASKED, TYPE_EXT_MASKED);
             int masked_num_1s = -1;
-            int has_vector_dest = is_vector_reg(instr->dst);
+            int has_vector_dest = is_vector_reg(instr->dst_d);
             if (lmul < 4) {
                 real_lmul = (double)(1 << lmul); // 0,1,2,3 -> 1,2,4,8
             } 
@@ -1231,6 +988,249 @@ void insn_exec(thread_state_t * state, instr_data * instr){
 		if (instr->vinstr_idx >= 0)
 			++state->accum_counters.vinstr[instr->vinstr_idx][sew];
 	}
+}
+
+//Vector and vsetvli instructions
+void insn_exec(thread_state_t * state, instr_data * instr){
+
+    if(DEBUG_INFO) fprintf(stdout, "Executing instruction: %s\n", instr->asm_string);
+	uint64_t thread_timestamp = synch_threads(state);
+	if (thread_timestamp==(uint64_t)-1) return;
+
+	profile_t * loop_profile = &state->loop_profile;
+	if (TRACE_ENABLED){
+		if (PRINT_PROFILE){
+			detect_loop_start(loop_profile, instr->PC);
+		}
+		if (PRINT_CALLTRACE){
+#if 1
+			detect_func_start(&state->call_trace, instr->PC); 
+#endif
+		}
+	}
+
+	int row = SCALAR_ROW;
+	uint64_t vl=0, vtype = 0, sew=3, lmul=1, rvl=0;
+	uint64_t addr = 0;
+	int stride = 0;
+	int data_sew = 3;
+
+	int8_t * indexes_8 = NULL;
+	int16_t * indexes_16 = NULL;
+	int32_t * indexes_32 = NULL;
+	int64_t * indexes_64 = NULL;
+
+    /** Get the vector length and type. Common to all vector instructions. */
+    vl = get_vl(state);
+    vtype = get_vtype(state);
+#ifdef RVV_07
+    sew = (vtype >> 2)&0x7;
+    lmul = vtype&0x3;
+#else
+    sew = (vtype >> 3)&0x7;
+    lmul = vtype&0x7;
+#endif
+
+	if (is_type(instr->type, T_VECTOR)){
+		row = VECTOR_ROW;
+		data_sew = sew;
+
+		if (is_subtype(instr->type, T_MEMORY)){
+			int is_indexed = is_subsubtype(instr->type, T_INDEX);
+			if (TRACE_ADDR || INST_TRACE_ENABLED || is_indexed){
+				int src1 = (instr->instr32>>15)&0x1F;
+				addr = get_xreg(state,src1);
+			}
+
+			if (is_subsubtype(instr->type, T_STRIDE)){
+				int src2 = (instr->instr32>>20)&0x1F;
+				stride = get_xreg(state,src2);
+			}
+#ifndef RVV_07
+			int width = (instr->instr32 >> 12)&0x3; 
+			sew = width;             /* SEW del indice (como leer el vector) */
+#endif
+
+			if((TRACE_INDEXES || INST_TRACE_ENABLED || is_indexed) && is_indexed){
+				int src2 = (instr->instr32>>20)&0x1F;
+				char * contents = get_vreg(state,src2,vl*(2<<(sew)));
+				if (sew==0) indexes_8 = (int8_t*)contents;
+				else if (sew==1) indexes_16 = (int16_t*)contents;
+				else if (sew==2) indexes_32 = (int32_t*)contents;
+				else if (sew==3) indexes_64 = (int64_t*)contents;
+			}
+
+			/* Rango de direcciones de esta ejecucion: base + indice*EEW.
+			 * Se acumula (max-min) y el numero de ejecuciones por
+			 * instruccion; el informe publica la media del rango. */
+			if (is_indexed && instr->vinstr_idx >= 0 && vl > 0){
+				int64_t emin = 0, emax = -1, step = (int64_t)1 << data_sew;
+				for (uint64_t i = 0; i < vl; ++i){
+					int64_t idx = indexes_8 ? (int64_t)indexes_8[i] :
+					             indexes_16 ? (int64_t)indexes_16[i] :
+					             indexes_32 ? (int64_t)indexes_32[i] :
+					             indexes_64 ? (int64_t)indexes_64[i] : 0;
+					int64_t a = (int64_t)addr + idx * step;
+					if (emax < 0){ emin = emax = a; }
+					if (a < emin) emin = a;
+					if (a > emax) emax = a;
+				}
+				if (emax >= emin){
+					state->accum_counters.addr_range_sum[instr->vinstr_idx] +=
+						(double)(emax - emin);
+					state->accum_counters.addr_range_n[instr->vinstr_idx] += 1;
+				}
+			}
+#ifndef RVV_07
+			if ((((instr->instr32>>20)&0xFF) == 0x28)){
+				sew = 0; //sew: 1 byte (8 bits)
+				vl = RAVE_VLMAX / 8; //vl
+			}
+		}else if ( ((instr->instr32&0x7F)==0x57) && (((instr->instr32>>26)&0x3F)==0x27) && (((instr->instr32>>12)&0x07)==0x03)) {
+			//Whole register move
+			int NFIELDS = (instr->instr32>>15)&0x1F;
+			lmul = NFIELDS==7?3 : NFIELDS==3?2 : NFIELDS==1?1 : 0;
+			sew = 0; //sew: 1 byte (8 bits)
+			vl = RAVE_VLMAX / 8; //vl
+#endif
+		}
+	}else if (is_type(instr->type, T_VSETVL)){
+		int src1 = (instr->instr32>>15)&0x1F;
+		rvl = get_xreg(state,src1);
+	}
+
+    // Dependencies tracking
+    track_dependencies(state, instr, lmul);
+
+	//  Logfile  //
+	if (TRACE_ENABLED){
+		if (PRINT_LOGFILE){
+			if (!TRACE_SCALAR && state->scalar_instr_since_vector>0){
+				char string[128];
+				if (-1 == sprintf(string,"%d", state->scalar_instr_since_vector)){
+					printf("Error sprintf\n"); 
+					exit(-1);
+				}
+				set_lock(write_lock);
+				plugin_outs(string);
+				plugin_outs(" scalar instructions\n");
+				release_lock(write_lock);
+			}
+			set_lock(write_lock);
+			plugin_outs(instr->asm_string);
+			plugin_outs("\n");
+			release_lock(write_lock);
+		}
+
+		//  Instruction Trace  //
+		if (INST_TRACE_ENABLED){
+			if (is_type(instr->type, T_VSETVL)){
+				inst_trace_emit_vsetvl(state, instr, rvl, vl, vtype);
+			}else{
+				void * idx_ptr = indexes_8 ? (void*)indexes_8 :
+				                 indexes_16 ? (void*)indexes_16 :
+				                 indexes_32 ? (void*)indexes_32 : (void*)indexes_64;
+				inst_trace_emit_vector(state, instr, vl, sew, lmul, vtype, addr, stride,
+				                       idx_ptr, is_subsubtype(instr->type, T_INDEX));
+			}
+		}
+
+		//  PRV  //
+		if (PRINT_PRV){
+			int cpu_index = state->cpu_index;
+			char row_change = (row != state->last_row) ?1:0;
+			if (row_change && !MUSA){ 
+				set_lock(write_lock);
+				trace_row(FD_PRV,mpi_rank, cpu_index, state->last_row, thread_timestamp);
+				clean_event(FD_PRV);
+				release_lock(write_lock);
+			}
+			//Scalar instructions should always be printed when: row changed(1), type changed (2), is first scalar in the trace (3)
+			if (is_type(instr->type, T_VSETVL)){
+				set_lock(write_lock);
+				trace_row(FD_PRV,mpi_rank, cpu_index, row, thread_timestamp);
+				trace_event_value(FD_PRV,event_class,instr->type);
+				trace_event_value(FD_PRV,event_pc, instr->PC);
+				trace_event_value(FD_PRV,event_instruction, instr->paraver_code);
+				if (MUSA){
+					int prev_dst = state->prev_dst;
+					state->prev_dst = instr->dst;
+					trace_event_value(FD_PRV,event_dst, prev_dst);
+				}else{
+					trace_event_value(FD_PRV,event_dst, instr->dst);
+				}
+				trace_event_value(FD_PRV,event_src1, instr->src1);
+				trace_event_value(FD_PRV,event_rvl, rvl); 
+				release_lock(write_lock);
+			}else{ //VECTOR 
+				set_lock(write_lock);
+				trace_row(FD_PRV,mpi_rank, cpu_index, row, thread_timestamp);
+				trace_event_value(FD_PRV,event_class,instr->type);
+				trace_event_value(FD_PRV,event_pc, instr->PC);
+				trace_event_value(FD_PRV,event_scalb, state->scalar_instr_since_vector);
+				if (TRACE_ADDR) trace_event_value(FD_PRV,event_addr, addr);
+				if (TRACE_INDEXES){
+					if (indexes_8 != NULL){
+						trace_event_value(FD_PRV, event_indexes, 1);
+						for(uint64_t i=0; i<vl; ++i) trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_8[i]);
+						free(indexes_8);
+						indexes_8 = NULL;
+					}else if (indexes_16 != NULL){
+						trace_event_value(FD_PRV, event_indexes, 1);
+						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_16[i]);
+						free(indexes_16);
+						indexes_16 = NULL;
+					}else if (indexes_32 != NULL){
+						trace_event_value(FD_PRV, event_indexes, 1);
+						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, (int)indexes_32[i]);
+						free(indexes_32);
+						indexes_32 = NULL;
+					}else if (indexes_64 != NULL){
+						trace_event_value(FD_PRV, event_indexes, 1);
+						for(uint64_t i=0; i<vl; ++i)  trace_event_value(FD_PRV, event_indexes+1+i, indexes_64[i]);
+						free(indexes_64);
+						indexes_64 = NULL;
+					}
+				}
+				if (MUSA){
+					int prev_dst = state->prev_dst;
+					state->prev_dst = instr->dst;
+					trace_event_value(FD_PRV,event_dst, prev_dst);
+				}else{
+					trace_event_value(FD_PRV,event_dst, instr->dst);
+				}
+				trace_event_value(FD_PRV,event_src1, instr->src1);
+				trace_event_value(FD_PRV,event_src2, instr->src2);
+				if (instr->src3>=0) trace_event_value(FD_PRV,event_src3, instr->src3);
+				trace_event_value(FD_PRV,event_instruction, instr->paraver_code);
+				trace_event_value(FD_PRV,event_vl, vl);
+				if (MUSA){
+					trace_event_value(FD_PRV,event_sew, 1<<(3+sew));
+					int musa_lmul = lmul<4 ? 1<<lmul : lmul==5?18 : lmul==6?14 : lmul==7?12 : 0;
+					trace_event_value(FD_PRV,event_lmul, musa_lmul);
+				}else{
+					trace_event_value(FD_PRV,event_sew, sew);
+					trace_event_value(FD_PRV,event_lmul, lmul);
+				}
+				if (is_type(instr->type, T_VECTOR) && is_subtype(instr->type, T_MEMORY) && is_subsubtype(instr->type, T_STRIDE)){
+					trace_event_value(FD_PRV,event_stride, stride);
+					state->reset_stride = 1;
+				}else if (state->reset_stride){
+					trace_event_value(FD_PRV,event_stride, 0);
+					state->reset_stride = 0;
+				}	
+				release_lock(write_lock);
+			}
+		}
+	}
+
+	if (indexes_8) { free(indexes_8); indexes_8 = NULL; }
+	if (indexes_16) { free(indexes_16); indexes_16 = NULL; }
+	if (indexes_32) { free(indexes_32); indexes_32 = NULL; }
+	if (indexes_64) { free(indexes_64); indexes_64 = NULL; }
+
+	// Counters //
+	accumulate_counters(state, loop_profile, instr, vl, vtype, sew, lmul, stride);
 
 	thread_timestamp++;
 	//TODO: Use an atomic here?
