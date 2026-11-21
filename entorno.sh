@@ -11,7 +11,6 @@ export RAVE_DEBUG_INFO=0
 # Trace de instrucciones (opcional).
 export RAVE_INST_TRACE_ENABLED=0
 export RAVE_INST_TRACE_NAME=rave_inst_trace.jsonl
-export 
 
 # Trace de bloques básicos (opcional).
 export RAVE_TRACE_BB=0
