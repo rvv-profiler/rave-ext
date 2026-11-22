@@ -16,6 +16,7 @@
 #include "inst_trace.h"
 #include <sched.h>
 #include <string.h>
+#include <math.h>
 
 static void record_vector_register(double * usage, short reg){
 	if (reg >= RAVE_INI_REG_V && reg < RAVE_INI_REG_V + NUM_VECTOR_REGS) {
@@ -1096,31 +1097,68 @@ void insn_exec(thread_state_t * state, instr_data * instr){
 		}
 	}else if (is_type(instr->type, T_VSETVL)){
 		int src1 = (instr->instr32>>15)&0x1F;
+        bool is_vsetivli = (((instr->instr32 >> 30) & 0x03) == 0x03);
+		bool is_vtype_only = (!is_vsetivli && instr->src1_d == 0 && instr->dst_d == 0);
+        double rvl_bytes = 0;
 
-		if ((((instr->instr32>>30)&0x03)==0x03)){ // vsetivli
-			rvl = src1;
+		if (is_vsetivli){ // vsetivli
+			rvl = (uint64_t)src1;
 		}else{                                    // vsetvl*
-			rvl = get_xreg(state,src1); 
+			rvl = (uint64_t)get_xreg(state,src1); 
 		}
+
+        rvl_bytes = rvl * (1ULL << sew); // As is int bytes.
+        if(!is_vtype_only && rvl != UINT64_MAX) state->accum_counters.rvl_accumulated_b += rvl_bytes;
 
         gpointer key = (gpointer)(uintptr_t)instr->PC;
         gpointer raw_val;
 
         /** The porpouse of this is to know which is the AVL needed for a given problem, thus, we 
-         * would like to avoid counting the cases in which there is not actual AVL. */
-        if(rvl > 0){
-            int64_t avl_anterior = 0;
+         * would like to avoid counting the cases in which there is not actual AVL. 
+         * We assume that if rvl is UINT64_MAX, rs1 held -1 (requesting VLMAX).*/
+        if(rvl > 0 && rvl != UINT64_MAX){
+
+            uint64_t avl_anterior = 0;
+            uint8_t counter = 0;
             if (g_hash_table_lookup_extended(state->g_vset_instr, key, NULL, &raw_val)) {
                 // La clave YA existía
-                avl_anterior = (int64_t)(intptr_t)raw_val;
+                uint64_t unpacked = (uint64_t)(uintptr_t)raw_val;
+                avl_anterior = unpacked >> 3;
+                counter = unpacked & 0x7ULL;
             }
 
             if(avl_anterior <= rvl) {
-                state->accum_counters.avl_accumulated_b += rvl * (8ULL << sew); // As is int bits.
+                state->accum_counters.avl_accumulated_b += rvl_bytes; 
                 state->accum_counters.avl_instr++;
+                counter = 0; // We are in a new loop invocation.
             } 
 
-            g_hash_table_insert(state->g_vset_instr, key, (gpointer)(intptr_t)rvl);
+            // Update VLEN bins (VLEN_iter[6])
+            double lmul_real = lmul < 4 ? (double)(1 << lmul) : (lmul > 4 ? 1.0 / (double)(1 << (8 - lmul)) : 0); // Convert LMUL to real LMUL (1,2,4,8)
+            if (vl > 0 && lmul_real > 0) {
+                for(int i = 0; i < 6; i++) {
+                    if(RAVE_VLMAX > VLEN_BINS[i]) {
+                        double active_bits = ((double)vl * (8ULL << sew)) / lmul_real;
+                        state->accum_counters.VLEN_iter[i] += ceil(active_bits / VLEN_BINS[i]);
+                        continue;
+                    }
+
+                    if(((counter * RAVE_VLMAX) % VLEN_BINS[i]) == 0) {
+                        state->accum_counters.VLEN_iter[i] += 1.0;
+                    }
+                }
+            }
+            
+            uint64_t avl_to_pack = (rvl > (UINT64_MAX >> 3)) ? (UINT64_MAX >> 3) : rvl; // We'll be losing the 3 LSBs, but that's ok, as it will not happend in practice.
+			uint64_t packed = (avl_to_pack << 3) | ((counter+1) & 0x7ULL);
+            g_hash_table_insert(state->g_vset_instr, key, (gpointer)(uintptr_t)packed);
+
+        } else if(!is_vtype_only){
+            if(vl > 0) {
+                for(int i = 0; i < 6; i++) {
+                    state->accum_counters.VLEN_iter[i]++;
+                }
+            }
         }
 	}
 

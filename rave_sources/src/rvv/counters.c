@@ -612,7 +612,8 @@ void print_counters_json(FILE * fd, rave_counters * c){
 	json_obj_open(fd, &f, "global_stats");
 	g = 1;
 	json_num(fd, &g, "avg_vl_elems", safe_div(vl_accum, vecinstr));
-	json_num(fd, &g, "avg_avl_bits", safe_div(c->avl_accumulated_b, c->avl_instr));
+	json_num(fd, &g, "avg_avl_bytes", safe_div(c->avl_accumulated_b, c->avl_instr));
+	json_num(fd, &g, "avg_rvl_bytes", safe_div(c->rvl_accumulated_b, c->vsetvl_instr));
 	json_num(fd, &g, "avg_vl_bits", safe_div(c->vl_accumulated_b, vecinstr));
 	json_num(fd, &g, "avg_lmul", safe_div(c->lmul_accumulated, vecinstr));
 	json_num(fd, &g, "avg_occupancy", safe_div(c->occupancy_accumulated, vecinstr));
@@ -621,6 +622,15 @@ void print_counters_json(FILE * fd, rave_counters * c){
 	json_int(fd, &g, "tu_effective", c->tu_count);
 	json_int(fd, &g, "ta_effective", c->ta_count);
 	json_int(fd, &g, "unique_vector_registers", unique_regs);
+	{
+		int f_bins = 1;
+		json_obj_open(fd, &g, "vlen_scalability_iters");
+		static const char * const vlen_bin_keys[6] = {"4096", "8192", "16384", "32768", "65536", "131072"};
+		for (int b = 0; b < 6; b++) {
+			json_int(fd, &f_bins, vlen_bin_keys[b], c->VLEN_iter[b]);
+		}
+		json_obj_close(fd);
+	}
 	json_obj_close(fd);
 
 	json_obj_open(fd, &f, "dependencies");

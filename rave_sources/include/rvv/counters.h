@@ -33,6 +33,8 @@ enum rave_movement_category {
     RAVE_MOVEMENT_CATEGORIES
 };
 
+static const uint64_t VLEN_BINS[6] = {4096, 8192, 16384, 32768, 65536, 131072};
+
 struct rave_counters{
 				double scalar_instr;
 				double vsetvl_instr;
@@ -114,13 +116,18 @@ struct rave_counters{
 
                 // To track accumulates and thus be able after to tell the average.
                 double vl_accumulated_b;
-                double avl_accumulated_b; // In bits.
-                double avl_instr;
-                double avl_effective_accumulated_b; // In bits, weighted by stripmining iterations.
-                double avl_effective_instr;
                 double lmul_accumulated;
                 double occupancy_accumulated;
                 double VLMAX_accumulated;
+                double avl_accumulated_b; // In bits.
+                double avl_instr;
+                double rvl_accumulated_b; // In bits, weighted by stripmining iterations.
+                // To track the number of iterations that we'll be doing depending the VLEN we've got.
+                double VLEN_iter[6];      // 0: 4096, 1: 8.192, 2: 16.384, 3: 32.768, 4: 65.536, 5: 131.072.
+                /** We'll be using 3 bits to count the number of iterations that we've performed in state.h::g_vset_instr. 
+                 * In a near future, Iterations will be recorded exclusively in the highest applicable VLEN bin
+                 * (non-cumulative / mutually exclusive). As an optimization.
+                */
 
                 // To keep track of the number of dependencies(scalar and vector)
                 double v_pos;

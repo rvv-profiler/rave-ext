@@ -454,6 +454,7 @@ void print_region_json(FILE * fd, int accumulate){
 	fputc('{', fd);
 	json_push();
 	json_str(fd, &first, "generator", "RAVE");
+	json_str(fd, &first, "schema_version", "2.0.1");
 	json_str(fd, &first, "binary", BINARY_NAME);
 	json_int(fd, &first, "vlen_bits", RAVE_VLMAX);
 	json_bool(fd, &first, "trace_extended", TRACE_EXTENDED);

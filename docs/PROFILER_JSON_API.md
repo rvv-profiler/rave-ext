@@ -16,6 +16,7 @@ Un JSON de un benchmark pequeño ocupa ~10 KB (pretty-printed, ~400 líneas).
 ```
 {
   "generator": "RAVE",          string  quién generó el fichero
+  "schema_version": "2.0.1",    string  versión semántica del esquema JSON
   "binary": "bin/axpy_vector.exe" | null,
   "vlen_bits": 16384,           int     VLEN (bits) con el que se midió
   "trace_extended": true,       bool    si se tomaron las métricas extendidas
@@ -103,7 +104,8 @@ instrucción están en `region.instructions`, con los niveles del listado (ver
 | Campo | Unidad | Significado |
 |---|---|---|
 | `avg_vl_elems` | elementos | media de VL (elementos) sobre las instrucciones vectoriales |
-| `avg_avl_bits` | bits | media de AVL en bits (`AVL·SEW`) solicitada por `vset*` (filtrando stripmining) |
+| `avg_avl_bytes` | bytes | media de AVL en bytes (`AVL·(SEW/8)`) solicitada por `vset*` (filtrando stripmining) |
+| `avg_rvl_bytes` | bytes | media de RVL en bytes (`RVL·(SEW/8)`) solicitada en todas las instrucciones `vset*` (sin filtrar stripmining) |
 | `avg_vl_bits` | bits | media de `min(VL·SEW, VLEN·LMUL)` |
 | `avg_lmul` | factor | media de LMUL (1/8 … 8) |
 | `avg_occupancy` | ratio 0..1 | media de `min(VL·SEW, VLEN·LMUL) / (VLEN·LMUL)`; 1.0 = usa todo el datapath |
@@ -112,6 +114,7 @@ instrucción están en `region.instructions`, con los niveles del listado (ver
 | `tu_effective` | nº instr | instrucciones con VL efectiva < VLMAX y política *tail-undisturbed* |
 | `ta_effective` | nº instr | ídem con política *tail-agnostic* |
 | `unique_vector_registers` | nº (0..32) | registros vectoriales distintos usados |
+| `vlen_scalability_iters` | objeto | iteraciones vectoriales estimadas por bin VLEN (`4096`, `8192`, `16384`, `32768`, `65536`, `131072` bits) |
 
 ### 1.3 `dependencies`
 

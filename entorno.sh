@@ -1,5 +1,7 @@
 export RAVE_TRACE_SCALAR=0
 export RAVE_PRINT_REPORT=1
+
+# Keep VLEN set like this if you want to extract VLEN metrics later; otherwise, they won't be accurate (the rest will be, though)
 export RAVE_VLEN=16384
 
 export RAVE_TRACE_EXTENDED=1
