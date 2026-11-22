@@ -103,6 +103,7 @@ instrucción están en `region.instructions`, con los niveles del listado (ver
 | Campo | Unidad | Significado |
 |---|---|---|
 | `avg_vl_elems` | elementos | media de VL (elementos) sobre las instrucciones vectoriales |
+| `avg_avl_bits` | bits | media de AVL en bits (`AVL·SEW`) solicitada por `vset*` (filtrando stripmining) |
 | `avg_vl_bits` | bits | media de `min(VL·SEW, VLEN·LMUL)` |
 | `avg_lmul` | factor | media de LMUL (1/8 … 8) |
 | `avg_occupancy` | ratio 0..1 | media de `min(VL·SEW, VLEN·LMUL) / (VLEN·LMUL)`; 1.0 = usa todo el datapath |

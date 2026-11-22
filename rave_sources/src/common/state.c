@@ -171,6 +171,12 @@ void reset_thread(int cpu_index){
 
     state->accum_counters.v_pos = 0;
     state->accum_counters.g_pos = 0;
+
+    if (state->g_vset_instr == NULL) {
+        state->g_vset_instr = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
+    } else {
+        g_hash_table_remove_all(state->g_vset_instr);
+    }
 	
 	setup_regs(cpu_index);
 

@@ -1096,7 +1096,32 @@ void insn_exec(thread_state_t * state, instr_data * instr){
 		}
 	}else if (is_type(instr->type, T_VSETVL)){
 		int src1 = (instr->instr32>>15)&0x1F;
-		rvl = get_xreg(state,src1);
+
+		if ((((instr->instr32>>30)&0x03)==0x03)){ // vsetivli
+			rvl = src1;
+		}else{                                    // vsetvl*
+			rvl = get_xreg(state,src1); 
+		}
+
+        gpointer key = (gpointer)(uintptr_t)instr->PC;
+        gpointer raw_val;
+
+        /** The porpouse of this is to know which is the AVL needed for a given problem, thus, we 
+         * would like to avoid counting the cases in which there is not actual AVL. */
+        if(rvl > 0){
+            int64_t avl_anterior = 0;
+            if (g_hash_table_lookup_extended(state->g_vset_instr, key, NULL, &raw_val)) {
+                // La clave YA existía
+                avl_anterior = (int64_t)(intptr_t)raw_val;
+            }
+
+            if(avl_anterior <= rvl) {
+                state->accum_counters.avl_accumulated_b += rvl * (8ULL << sew); // As is int bits.
+                state->accum_counters.avl_instr++;
+            } 
+
+            g_hash_table_insert(state->g_vset_instr, key, (gpointer)(intptr_t)rvl);
+        }
 	}
 
     // Dependencies tracking

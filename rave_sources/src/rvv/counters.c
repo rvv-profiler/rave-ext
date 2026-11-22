@@ -612,6 +612,7 @@ void print_counters_json(FILE * fd, rave_counters * c){
 	json_obj_open(fd, &f, "global_stats");
 	g = 1;
 	json_num(fd, &g, "avg_vl_elems", safe_div(vl_accum, vecinstr));
+	json_num(fd, &g, "avg_avl_bits", safe_div(c->avl_accumulated_b, c->avl_instr));
 	json_num(fd, &g, "avg_vl_bits", safe_div(c->vl_accumulated_b, vecinstr));
 	json_num(fd, &g, "avg_lmul", safe_div(c->lmul_accumulated, vecinstr));
 	json_num(fd, &g, "avg_occupancy", safe_div(c->occupancy_accumulated, vecinstr));

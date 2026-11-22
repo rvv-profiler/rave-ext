@@ -234,6 +234,12 @@ void rave_exit()
 	if (INST_TRACE_ENABLED) {
 		inst_trace_exit();
 	}
+	for (int i = 0; i < N_THREADS; ++i) {
+		if (cpus_state && cpus_state[i].g_vset_instr) {
+			g_hash_table_destroy(cpus_state[i].g_vset_instr);
+			cpus_state[i].g_vset_instr = NULL;
+		}
+	}
 	fflush(stdout);
 }
 

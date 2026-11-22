@@ -151,6 +151,11 @@
           "minimum": 0,
           "description": "Media de VL (elementos) sobre las instrucciones vectoriales."
         },
+        "avg_avl_bits": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Media de AVL en bits (AVL*SEW) solicitada por vset* al inicio de bucles vectoriales (filtrando stripmining)."
+        },
         "avg_vl_bits": {
           "type": "number",
           "minimum": 0,

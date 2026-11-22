@@ -114,6 +114,10 @@ struct rave_counters{
 
                 // To track accumulates and thus be able after to tell the average.
                 double vl_accumulated_b;
+                double avl_accumulated_b; // In bits.
+                double avl_instr;
+                double avl_effective_accumulated_b; // In bits, weighted by stripmining iterations.
+                double avl_effective_instr;
                 double lmul_accumulated;
                 double occupancy_accumulated;
                 double VLMAX_accumulated;

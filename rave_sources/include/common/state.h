@@ -10,6 +10,7 @@
 #include "profiling.h"
 #include "counters.h"
 #include <stdint.h>
+#include <glib.h>
 
 //Exported Variables
 extern uint64_t timestamp;
@@ -114,6 +115,9 @@ struct thread_state_t{
     } rvv_raw_win[16];
     int rvv_raw_win_idx;
     int rvv_raw_win_len;
+
+    // To track AVL & vset* instructions
+    GHashTable *g_vset_instr;
 
     int prev_vec_type_ext;
 
