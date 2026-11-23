@@ -11,12 +11,22 @@ typedef enum {
     BB_END
 } bb_terminator_t;
 
-typedef struct  {
+typedef struct {
+    char *asm_str;
+    uint8_t uf_id;
+    int dst_id;
+    int src1_id;
+    int src2_id;
+    int src3_id;
+} bb_insn_meta_t;
+
+typedef struct {
     uint64_t pc;
     uint64_t end_pc;
     uint32_t opcode;
     uint32_t vec_inst;
     uint32_t n;
+    bb_insn_meta_t *insns;
 } tb_data_t;    
 
 typedef struct {                                                                                                                                                                        
@@ -26,6 +36,7 @@ typedef struct {
     uint64_t num_insns;       /* Total de instrucciones del bloque */
     uint64_t num_vec_insns;   /* Total de instrucciones vectoriales */
     uint64_t exec_count;      /* Número de veces que se ha ejecutado */
+    GPtrArray *tb_blocks;     /* Array de tb_data_t* que forman este bloque básico */
 } bb_node_t;
 
 typedef struct {

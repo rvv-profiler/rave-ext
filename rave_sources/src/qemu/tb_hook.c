@@ -219,6 +219,10 @@ void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 
 	scalar_block_data_t * scalar_block_data = NULL;
 	size_t scalar_block_start = 0;
+	bb_insn_meta_t *bb_insns = NULL;
+	if (TRACE_BB) {
+		bb_insns = (bb_insn_meta_t *)calloc(n, sizeof(bb_insn_meta_t));
+	}
 	for (size_t i = 0; i < n; i++) {
 		insn = qemu_plugin_tb_get_insn(tb, i);
 		insn_disas = qemu_plugin_insn_disas(insn);
@@ -247,6 +251,33 @@ void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 			//Register vector instruction
 			instr_data * insn_struct = fill_instr_struct(insn_vaddr, insn_disas, insn_opcode, PRINT_PRV);
 			qemu_plugin_register_vcpu_insn_exec_cb(insn, vcpu_insn_exec, QEMU_PLUGIN_CB_R_REGS, insn_struct);
+
+			if (TRACE_BB && bb_insns) {
+				bb_insns[i].asm_str = strdup(insn_disas ? insn_disas : "");
+				bb_insns[i].dst_id = insn_struct->dst_d;
+				bb_insns[i].src1_id = insn_struct->src1_d;
+				bb_insns[i].src2_id = insn_struct->src2_d;
+				bb_insns[i].src3_id = insn_struct->src3_d;
+
+				if (is_type(insn_struct->type, T_VSETVL)) {
+					bb_insns[i].uf_id = 1; /* v_cfg */
+				} else if (is_subtype(insn_struct->type, T_MEMORY)) {
+					bb_insns[i].uf_id = 2; /* v_mem */
+				} else if (is_subtype(insn_struct->type, T_ARITH)) {
+					if (is_subsubsubtype(insn_struct->type, T_FUSED)) {
+						bb_insns[i].uf_id = 5; /* v_fused */
+					} else if (is_subsubtype(insn_struct->type, T_FP)) {
+						bb_insns[i].uf_id = 4; /* v_fpu */
+					} else {
+						bb_insns[i].uf_id = 3; /* v_alu */
+					}
+				} else if (is_subtype(insn_struct->type, T_OTHER)) {
+					bb_insns[i].uf_id = 6; /* v_perm */
+				} else {
+					bb_insns[i].uf_id = 3; /* v_alu */
+				}
+			}
+
 			//Prepare next scalar block
 			scalar_block_start = i+1;
 		}
@@ -254,6 +285,14 @@ void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 			//Register scalar block
 			if (scalar_block_start != i){
 				qemu_plugin_register_vcpu_insn_exec_cb(qemu_plugin_tb_get_insn(tb,scalar_block_start), vcpu_scalar_block_exec, QEMU_PLUGIN_CB_NO_REGS, scalar_block_data);
+			}
+			if (TRACE_BB && bb_insns) {
+				bb_insns[i].asm_str = strdup(insn_disas ? insn_disas : "");
+				bb_insns[i].uf_id = 0; /* escalar */
+				bb_insns[i].dst_id = -1;
+				bb_insns[i].src1_id = -1;
+				bb_insns[i].src2_id = -1;
+				bb_insns[i].src3_id = -1;
 			}
 			//Prepare next scalar block
 			scalar_block_start = i+1;
@@ -276,6 +315,15 @@ void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 					&scalar_block_data->src1_d[i-scalar_block_start],
 					&scalar_block_data->src2_d[i-scalar_block_start]);
 			}
+			if (TRACE_BB && bb_insns) {
+				bb_insns[i].asm_str = strdup(insn_disas ? insn_disas : "");
+				bb_insns[i].uf_id = 0; /* escalar */
+				bb_insns[i].src3_id = -1;
+				scalar_register_ids(insn_disas,
+					&bb_insns[i].dst_id,
+					&bb_insns[i].src1_id,
+					&bb_insns[i].src2_id);
+			}
 			//printf("%d/%ld → %s\n",i,n,insn_disas);
 			rolling_scalar_block(insn_opcode, insn_vaddr, scalar_block_data);
 		}
@@ -292,6 +340,7 @@ void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
         tb_data->opcode = insn_opcode;
         tb_data->vec_inst = vector_count;
         tb_data->n = n;
+        tb_data->insns = bb_insns;
         qemu_plugin_register_vcpu_insn_exec_cb(insn, vcpu_bb_analyze, QEMU_PLUGIN_CB_NO_REGS, tb_data);
     } 
 

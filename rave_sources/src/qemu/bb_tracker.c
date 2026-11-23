@@ -10,6 +10,7 @@ typedef struct {
     uint64_t bb_last_pc;
     uint32_t last_bb_id;
     bool in_bb;
+    GPtrArray *cur_blocks; /* Bloques TCG que componen el bloque basico actual */
 } vcpu_bb_state_t;
 
 static vcpu_bb_state_t *g_vcpu_states = NULL;
@@ -33,6 +34,7 @@ void bb_tracker_init(size_t max_vcpus) {
     g_vcpu_states = (vcpu_bb_state_t*)calloc(g_max_vcpus, sizeof(vcpu_bb_state_t));
     for (size_t v = 0; v < g_max_vcpus; ++v) {
         g_vcpu_states[v].last_bb_id = UINT32_MAX;
+        g_vcpu_states[v].cur_blocks = g_ptr_array_new();
     }
     g_bb_map = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
     g_bb_nodes = g_ptr_array_new();
@@ -87,8 +89,10 @@ void bb_tracker_on_tb_exec(unsigned int vcpu_index, tb_data_t *tb_data) {
         st->acc_vec_inst = 0;
         st->in_bb = true;
         st->bb_start_pc = tb_data->pc;
+        g_ptr_array_set_size(st->cur_blocks, 0);
     }
 
+    g_ptr_array_add(st->cur_blocks, tb_data);
     st->acc_insnt += tb_data->n;
     st->acc_vec_inst += tb_data->vec_inst;
     if(bb_tracker_classify_terminator(tb_data->opcode) == BB_END) {
@@ -106,6 +110,10 @@ void bb_tracker_on_tb_exec(unsigned int vcpu_index, tb_data_t *tb_data) {
             node->num_insns = st->acc_insnt;
             node->num_vec_insns = st->acc_vec_inst;
             node->exec_count = 1;
+            node->tb_blocks = g_ptr_array_new();
+            for (guint b = 0; b < st->cur_blocks->len; ++b) {
+                g_ptr_array_add(node->tb_blocks, g_ptr_array_index(st->cur_blocks, b));
+            }
 
             g_hash_table_insert(g_bb_map, key, node);
             g_ptr_array_add(g_bb_nodes, node);
@@ -142,6 +150,9 @@ void bb_tracker_cleanup(void) {
     if (g_bb_nodes) {
         for(size_t i = 0; i < g_bb_nodes->len; ++i) {
             bb_node_t *node = (bb_node_t *)g_ptr_array_index(g_bb_nodes, i);
+            if (node->tb_blocks) {
+                g_ptr_array_free(node->tb_blocks, true);
+            }
             free(node);
         }
         g_ptr_array_free(g_bb_nodes, true);
@@ -167,6 +178,11 @@ void bb_tracker_cleanup(void) {
 
     g_mutex_clear(&g_bb_lock);
     if (g_vcpu_states) {
+        for (size_t v = 0; v < g_max_vcpus; ++v) {
+            if (g_vcpu_states[v].cur_blocks) {
+                g_ptr_array_free(g_vcpu_states[v].cur_blocks, true);
+            }
+        }
         free(g_vcpu_states);
         g_vcpu_states = NULL;
     }
@@ -178,6 +194,12 @@ void bb_tracker_dump_json(const char *filepath) {
 
     fprintf(f, "{\n");
     fprintf(f, "  \"generator\": \"RAVE\",\n");
+    fprintf(f, "  \"schema_version\": \"1.0.0\",\n");
+    if (BINARY_NAME) {
+        fprintf(f, "  \"binary\": \"%s\",\n", BINARY_NAME);
+    } else {
+        fprintf(f, "  \"binary\": null,\n");
+    }
     fprintf(f, "  \"summary\": {\n");
     fprintf(f, "    \"total_unique_bbs\": %u,\n", g_bb_nodes ? g_bb_nodes->len : 0);
     fprintf(f, "    \"total_edges\": %u\n", g_bb_edges ? g_bb_edges->len : 0);
@@ -203,7 +225,36 @@ void bb_tracker_dump_json(const char *filepath) {
         fprintf(f, "          \"vector_ratio\": %.4f\n", v_ratio);
         fprintf(f, "        },\n");
         fprintf(f, "        \"execution_count\": %lu\n", n->exec_count);
-        fprintf(f, "      }\n");
+        fprintf(f, "      },\n");
+        fprintf(f, "      \"instructions\": [\n");
+
+        uint64_t insn_idx = 0;
+        if (n->tb_blocks) {
+            for (guint b = 0; b < n->tb_blocks->len; ++b) {
+                tb_data_t *tb = (tb_data_t *)g_ptr_array_index(n->tb_blocks, b);
+                if (tb && tb->insns) {
+                    for (uint32_t j = 0; j < tb->n; ++j) {
+                        bb_insn_meta_t *im = &tb->insns[j];
+                        fprintf(f, "        [\"%s\", %u, [", im->asm_str ? im->asm_str : "", im->uf_id);
+
+                        /* dst */
+                        if (im->dst_id >= 0) fprintf(f, "%d", im->dst_id);
+                        fprintf(f, "], [");
+
+                        /* srcs */
+                        int first_src = 1;
+                        if (im->src1_id >= 0) { fprintf(f, "%d", im->src1_id); first_src = 0; }
+                        if (im->src2_id >= 0) { if (!first_src) fprintf(f, ", "); fprintf(f, "%d", im->src2_id); first_src = 0; }
+                        if (im->src3_id >= 0) { if (!first_src) fprintf(f, ", "); fprintf(f, "%d", im->src3_id); }
+
+                        fprintf(f, "]]");
+                        insn_idx++;
+                        fprintf(f, "%s\n", (insn_idx < n->num_insns) ? "," : "");
+                    }
+                }
+            }
+        }
+        fprintf(f, "      ]\n");
         fprintf(f, "    }%s\n", (i + 1 < g_bb_nodes->len) ? "," : "");
     }
 

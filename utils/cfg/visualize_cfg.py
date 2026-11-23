@@ -465,8 +465,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 el.innerText = `✓ Traza activa: ${count.toLocaleString()} instrucciones indexadas por PC`;
                 el.style.color = "var(--accent-green)";
             } else {
-                el.innerText = "⚠ Sin traza cargada. Carga un rave_inst_trace.jsonl para ver el código.";
-                el.style.color = "var(--accent-amber)";
+                el.innerText = "ℹ Sin traza dinámica cargada. Usando desensamblado estático de bb.json si está disponible.";
+                el.style.color = "var(--text-muted)";
             }
         }
 
@@ -684,6 +684,77 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         <tr class="code-row ${isVec ? 'vector-row' : ''}">
                             <td class="code-cell pc-cell">${inst.pc}</td>
                             <td class="code-cell bin-cell">${inst.binary ? inst.binary.replace('0x','') : ''}</td>
+                            <td class="code-cell asm-cell"><span class="${mnemClass}">${mnem}</span> <span style="color: #cbd5e1;">${rest}</span></td>
+                            <td class="code-cell badge-cell">${badges}</td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                        </table>
+                    </div>
+                `;
+            } else if (n.instructions && n.instructions.length > 0) {
+                const ufLabels = ["scalar", "v_cfg", "v_mem", "v_alu", "v_fpu", "v_fused", "v_perm"];
+                const formatReg = (r) => {
+                    if (r < 0) return "";
+                    if (r < 32) return `x${r}`;
+                    if (r < 64) return `f${r - 32}`;
+                    if (r < 96) return `v${r - 64}`;
+                    return `r${r}`;
+                };
+
+                html += `
+                    <div class="code-viewer">
+                        <div class="code-header">
+                            <span># | ENSAMBLADOR</span>
+                            <span>UNIDAD FUNCIONAL | REGS (DST &larr; SRCS)</span>
+                        </div>
+                        <table class="code-table">
+                `;
+
+                n.instructions.forEach((insn, idx) => {
+                    let asmText = "";
+                    let ufId = 0;
+                    let dsts = [];
+                    let srcs = [];
+
+                    if (Array.isArray(insn)) {
+                        asmText = insn[0] || "";
+                        ufId = insn[1] || 0;
+                        dsts = insn[2] || [];
+                        srcs = insn[3] || [];
+                    } else if (typeof insn === "string") {
+                        asmText = insn;
+                    }
+
+                    const isVec = ufId > 0 || asmText.trim().startsWith("v");
+                    const mnemClass = isVec ? "asm-mnemonic vec" : "asm-mnemonic";
+                    const ufName = ufLabels[ufId] || `uf_${ufId}`;
+
+                    let mnem = "";
+                    let rest = "";
+                    const parts = asmText.trim().split(/\s+/);
+                    if (parts.length > 0) {
+                        mnem = parts[0];
+                        rest = asmText.slice(asmText.indexOf(mnem) + mnem.length);
+                    }
+
+                    const dstStr = dsts.map(formatReg).filter(Boolean).join(", ");
+                    const srcStr = srcs.map(formatReg).filter(Boolean).join(", ");
+                    let depStr = "";
+                    if (dstStr || srcStr) {
+                        depStr = `${dstStr || "-"} &larr; ${srcStr || "-"}`;
+                    }
+
+                    let badges = `<span class="badge ${isVec ? 'badge-vec' : ''}">${ufName}</span>`;
+                    if (depStr) {
+                        badges += ` <span style="font-family: monospace; font-size: 0.72rem; color: var(--text-muted);">${depStr}</span>`;
+                    }
+
+                    html += `
+                        <tr class="code-row ${isVec ? 'vector-row' : ''}">
+                            <td class="code-cell pc-cell" style="width: 35px; color: var(--text-muted);">#${idx + 1}</td>
                             <td class="code-cell asm-cell"><span class="${mnemClass}">${mnem}</span> <span style="color: #cbd5e1;">${rest}</span></td>
                             <td class="code-cell badge-cell">${badges}</td>
                         </tr>

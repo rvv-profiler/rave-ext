@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RAVE Basic Block and CFG Schema",
+  "version": "1.0.0",
+  "description": "Esquema del JSON de bloques basicos y grafo de flujo de control (CFG) generado por el tracker de QEMU en RAVE (bb_tracker.c) y consumido por visualizadores y herramientas de analisis.",
+  "type": "object",
+  "required": [
+    "generator",
+    "schema_version",
+    "binary",
+    "summary",
+    "nodes",
+    "edges"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "generator": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Quien genero el fichero (actualmente \"RAVE\")."
+    },
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0.0"],
+      "description": "Version semantica del esquema del fichero de bloques basicos emitido por RAVE."
+    },
+    "binary": {
+      "type": ["string", "null"],
+      "description": "Ruta del binario medido, tal como se paso en la linea de ordenes."
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "nodes": {
+      "type": "array",
+      "description": "Listado de nodos que componen el CFG (bloques basicos).",
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Listado de transiciones dirigidas (aristas) entre bloques basicos.",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    }
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "description": "Resumen cuantitativo global del grafo de control.",
+      "required": [
+        "total_unique_bbs",
+        "total_edges"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "total_unique_bbs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Numero total de bloques basicos unicos identificados."
+        },
+        "total_edges": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Numero total de transiciones (aristas) unicas entre bloques basicos."
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "description": "Representacion de un bloque basico en el grafo de control.",
+      "required": [
+        "id",
+        "pc",
+        "metrics",
+        "instructions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Identificador secuencial unico del bloque basico (0-indexed)."
+        },
+        "pc": {
+          "$ref": "#/$defs/pc_range"
+        },
+        "metrics": {
+          "$ref": "#/$defs/node_metrics"
+        },
+        "instructions": {
+          "type": "array",
+          "description": "Secuencia ordenada de instrucciones que componen el bloque basico en formato tupla compacta [asm, uf_id, dst, srcs].",
+          "items": {
+            "$ref": "#/$defs/instruction"
+          }
+        }
+      }
+    },
+    "pc_range": {
+      "type": "object",
+      "description": "Rango de direcciones virtuales correspondientes al bloque basico.",
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]+$",
+          "description": "Direccion virtual del PC inicial del bloque basico."
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]+$",
+          "description": "Direccion virtual del PC de la ultima instruccion del bloque basico."
+        }
+      }
+    },
+    "node_metrics": {
+      "type": "object",
+      "description": "Metricas estaticas y dinamicas del bloque basico.",
+      "required": [
+        "instructions",
+        "execution_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "instructions": {
+          "type": "object",
+          "required": [
+            "total",
+            "scalar",
+            "vector",
+            "vector_ratio"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Numero total de instrucciones en el bloque basico."
+            },
+            "scalar": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Numero de instrucciones escalares en el bloque basico."
+            },
+            "vector": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Numero de instrucciones vectoriales en el bloque basico."
+            },
+            "vector_ratio": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0,
+              "description": "Proporcion de instrucciones vectoriales respecto al total (vector / total)."
+            }
+          }
+        },
+        "execution_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Contador de ejecuciones del bloque basico a lo largo de la traza."
+        }
+      }
+    },
+    "instruction": {
+      "type": "array",
+      "description": "Tupla compacta [asm, uf_id, dst, srcs]. IDs de registros: 0..31 (x0..x31), 32..63 (f0..f31), 64..95 (v0..v31).",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": [
+        {
+          "type": "string",
+          "description": "Cadena de texto desensamblada de la instruccion."
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "Identificador de Unidad Funcional (3 bits: 0=escalar, 1=v_cfg, 2=v_mem, 3=v_alu, 4=v_fpu, 5=v_fused, 6=v_perm)."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 95
+          },
+          "description": "Lista de IDs numericos de registros destino modificados."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 95
+          },
+          "description": "Lista de IDs numericos de registros origen leidos."
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "description": "Arista dirigida en el grafo de flujo de control (transicion de ejecucion).",
+      "required": [
+        "src",
+        "dst",
+        "count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "src": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ID del bloque basico de origen."
+        },
+        "dst": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ID del bloque basico de destino."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Numero de veces que se ha transitado esta arista entre bloques basicos."
+        }
+      }
+    }
+  }
+}
